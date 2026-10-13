@@ -1,0 +1,6 @@
+# WorkPilot AI - Docker Compose Placeholder Configuration
+# Note: Infrastructure and microservice configurations will be defined in subsequent development phases.
+
+version: '3.8'
+
+services: {}
