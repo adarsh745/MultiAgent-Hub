@@ -18,7 +18,11 @@ if _local_dir in sys.path:
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agents.multi_agent.tools import search_slack_messages
+from agents.multi_agent.tools import (
+    get_recent_slack_messages,
+    is_recent_slack_intent,
+    search_slack_messages,
+)
 from app.services.slack_service import (
     SlackServiceError,
     SlackNotInChannelError,
@@ -145,12 +149,137 @@ def test_search_slack_messages_error_handling():
         assert "Bot is not in channel" in result
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "latest Slack messages",
+        "recent conversation in Slack",
+        "What did the team discuss recently?",
+    ],
+)
+def test_recent_slack_intent_detection(query):
+    assert is_recent_slack_intent(query)
+
+
+def test_topic_search_is_not_recent_history_intent():
+    assert not is_recent_slack_intent("Find Slack messages about the RAG project")
+
+
+def test_recent_slack_history_uses_explicit_channel_and_returns_newest_first():
+    history = [
+        {
+            "user": "U_OLD",
+            "ts": "1710000001.000001",
+            "timestamp": "2024-03-09T16:00:01+00:00",
+            "text": "Older update",
+            "permalink": "https://slack.test/older",
+        },
+        {
+            "user": "U_NEW",
+            "ts": "1710000002.000002",
+            "timestamp": "2024-03-09T16:00:02+00:00",
+            "text": "Latest update",
+            "permalink": "https://slack.test/latest",
+        },
+    ]
+    with patch("agents.multi_agent.tools.SlackService") as mock_service:
+        service = MagicMock()
+        service.validate_config.return_value = (True, None)
+        service.default_channel = "configured-channel"
+        service.get_channel_history_sync.return_value = history
+        mock_service.return_value = service
+
+        result = get_recent_slack_messages.invoke(
+            {"query": "recent conversation in Slack", "channel": "team-updates"}
+        )
+
+    service.get_channel_history_sync.assert_called_once_with("team-updates", limit=20)
+    data = json.loads(result)
+    assert data["channel"] == "team-updates"
+    assert [message["author"] for message in data["items"]] == ["U_NEW", "U_OLD"]
+    assert data["items"][0] == {
+        "author": "U_NEW",
+        "timestamp": "2024-03-09T16:00:02+00:00",
+        "text": "Latest update",
+        "permalink": "https://slack.test/latest",
+    }
+
+
+def test_recent_slack_history_uses_configured_default_channel():
+    with patch("agents.multi_agent.tools.SlackService") as mock_service:
+        service = MagicMock()
+        service.validate_config.return_value = (True, None)
+        service.default_channel = "#configured-channel"
+        service.get_channel_history_sync.return_value = []
+        mock_service.return_value = service
+
+        result = get_recent_slack_messages.invoke(
+            {"query": "latest Slack messages"}
+        )
+
+    service.get_channel_history_sync.assert_called_once_with(
+        "configured-channel",
+        limit=20,
+    )
+    data = json.loads(result)
+    assert data["channel"] == "configured-channel"
+    assert data["count"] == 0
+    assert data["items"] == []
+
+
+def test_recent_slack_history_requests_channel_when_no_default_exists():
+    with patch("agents.multi_agent.tools.SlackService") as mock_service:
+        service = MagicMock()
+        service.validate_config.return_value = (True, None)
+        service.default_channel = ""
+        mock_service.return_value = service
+
+        result = get_recent_slack_messages.invoke(
+            {"query": "What did the team discuss recently?"}
+        )
+
+    assert "Please specify a channel" in result
+    service.get_channel_history_sync.assert_not_called()
+
+
+def test_research_graph_routes_recent_slack_query_to_history_tool():
+    from agents.multi_agent.research_graph import research_graph
+
+    with patch("agents.multi_agent.tools.SlackService") as mock_service:
+        service = MagicMock()
+        service.validate_config.return_value = (True, None)
+        service.default_channel = "team-updates"
+        service.get_channel_history_sync.return_value = [
+            {
+                "user": "U1",
+                "ts": "1710000002.000002",
+                "timestamp": "2024-03-09T16:00:02+00:00",
+                "text": "Latest team update",
+                "permalink": "https://slack.test/latest",
+            }
+        ]
+        mock_service.return_value = service
+
+        result = research_graph.invoke(
+            {"messages": [HumanMessage(content="What is the recent conversation in Slack?")]}
+        )
+
+    service.get_channel_history_sync.assert_called_once_with(
+        "team-updates",
+        limit=20,
+    )
+    assert "Recent Slack messages (newest first)" in result["messages"][-1].content
+    assert "Latest team update" in result["messages"][-1].content
+    assert "https://slack.test/latest" in result["messages"][-1].content
+
+
 # 6. Research subgraph tool registration and ToolNode loop
 def test_research_subgraph_has_slack_tool():
     from agents.multi_agent.research_graph import tools
 
     tool_names = [t.name for t in tools]
     assert "search_slack_messages" in tool_names
+    assert "get_recent_slack_messages" in tool_names
     assert "search_jira_issues" in tool_names
     assert "search_github_repository" in tool_names
 

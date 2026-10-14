@@ -34,8 +34,8 @@ STOP_WORDS = {
 def build_jql_from_query(query: str) -> str:
     """
     Deterministically convert a natural language query or structured string into safe JQL.
-    Enforces read-only bounded search suitable for Jira Cloud /rest/api/3/search/jql.
-    Handles pseudo-qualifier prefixes like type:issue, component:wallet, status:open.
+    Natural-language terms use a bounded text search; project constraints are accepted only
+    as explicit JQL rather than inferred from arbitrary words.
     """
     clean_query = (query or "").strip()
     if not clean_query:
@@ -61,16 +61,6 @@ def build_jql_from_query(query: str) -> str:
     lower_query = clean_query.lower()
     clauses = []
 
-    # Check for project key mentions
-    proj_match = re.search(r"\b(?:project|project:)\s*([A-Z0-9]+)\b", clean_query, re.IGNORECASE)
-    if proj_match:
-        clauses.append(f'project = "{proj_match.group(1).upper()}"')
-    else:
-        for standalone_proj in ["SAM1", "KAN"]:
-            if re.search(rf"\b{standalone_proj}\b", clean_query, re.IGNORECASE):
-                clauses.append(f'project = "{standalone_proj}"')
-                break
-
     # Status intent
     if any(term in lower_query for term in ["unresolved", "open", "in progress", "pending", "active", "to do", "todo"]):
         clauses.append("statusCategory != Done")
@@ -91,7 +81,7 @@ def build_jql_from_query(query: str) -> str:
     ]
     keywords = [
         w for w in normalized_words
-        if w and w not in STOP_WORDS and not re.match(r"^(sam1|kan)$", w)
+        if w and w not in STOP_WORDS
     ]
     if keywords:
         text_term = " ".join(keywords)

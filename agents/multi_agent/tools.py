@@ -35,6 +35,31 @@ from app.services.slack_service import (
 
 logger = logging.getLogger(__name__)
 
+_RECENT_SLACK_INTENT_PATTERNS = (
+    re.compile(r"\b(?:recent|latest|most recent|last)\b.*\b(?:messages?|conversations?|discussions?|chats?)\b", re.I),
+    re.compile(r"\b(?:messages?|conversations?|discussions?|chats?)\b.*\b(?:recent|latest|recently|lately)\b", re.I),
+    re.compile(r"\bwhat did (?:the )?team (?:discuss|talk about|say)\b.*\b(?:recently|lately)\b", re.I),
+)
+
+
+def is_recent_slack_intent(query: str) -> bool:
+    """Return whether a request asks for recent Slack/team conversation history."""
+    return any(pattern.search(query) for pattern in _RECENT_SLACK_INTENT_PATTERNS)
+
+
+def extract_slack_channel(query: str) -> str:
+    """Extract an explicitly named Slack channel without treating source names as channels."""
+    hash_match = re.search(r"#([A-Za-z0-9_-]+)", query)
+    if hash_match:
+        return hash_match.group(1)
+
+    channel_match = re.search(
+        r"\b(?:in|from|within)\s+(?:the\s+)?([A-Za-z0-9_-]+)\s+channel\b",
+        query,
+        re.IGNORECASE,
+    )
+    return channel_match.group(1) if channel_match else ""
+
 
 @tool
 def search_jira_issues(query: str) -> str:
@@ -230,7 +255,13 @@ def search_slack_messages(query: str, channel: str = "") -> str:
     target_channel = channel.strip() if channel else None
 
     # Extract channel from query if mentioned, e.g. "in #new-channel", "in new-channel", "channel:new-channel"
-    ch_match = re.search(r"(?:in\s+#?|channel[:\s]+#?)([A-Za-z0-9_-]+)", clean_query, re.IGNORECASE)
+    ch_match = None
+    if not target_channel:
+        ch_match = re.search(
+            r"(?:in\s+#?|channel[:\s]+#?)([A-Za-z0-9_-]+)",
+            clean_query,
+            re.IGNORECASE,
+        )
     if ch_match:
         extracted = ch_match.group(1).lower()
         if extracted not in ("slack", "workspace", "my", "the", "a", "an", "this"):
@@ -289,3 +320,65 @@ def search_slack_messages(query: str, channel: str = "") -> str:
         return f"Slack API error: {exc.message}"
     except Exception as exc:
         return f"Unexpected error during Slack search: {type(exc).__name__}"
+
+
+@tool
+def get_recent_slack_messages(query: str, channel: str = "") -> str:
+    """
+    Retrieve recent Slack channel history for recent-conversation requests.
+    Requires a specified channel or configured SLACK_DEFAULT_CHANNEL.
+    """
+    service = SlackService()
+    is_valid, error = service.validate_config()
+    if not is_valid:
+        return f"Error: Slack is not configured properly. {error}"
+
+    target_channel = (
+        channel.strip().lstrip("#")
+        or extract_slack_channel(query)
+        or service.default_channel.lstrip("#")
+    )
+    if not target_channel:
+        return (
+            "A Slack channel is required to retrieve recent messages. "
+            "Please specify a channel (for example, #engineering)."
+        )
+
+    try:
+        messages = service.get_channel_history_sync(target_channel, limit=20)
+    except SlackNotInChannelError as exc:
+        return f"Slack error: {exc.message}"
+    except SlackNotFoundError as exc:
+        return f"Slack error: {exc.message}"
+    except SlackPermissionError as exc:
+        return f"Slack permission error: {exc.message}"
+    except SlackServiceError as exc:
+        return f"Slack API error: {exc.message}"
+    except Exception as exc:
+        return f"Unexpected error during recent Slack history retrieval: {type(exc).__name__}"
+
+    messages = sorted(
+        messages,
+        key=lambda item: float(item.get("ts") or 0),
+        reverse=True,
+    )
+    items = [
+        {
+            "author": message.get("user") or message.get("username") or "unknown",
+            "timestamp": message.get("timestamp") or message.get("ts", ""),
+            "text": message.get("text", ""),
+            "permalink": message.get("permalink", ""),
+        }
+        for message in messages
+    ]
+    return json.dumps(
+        {
+            "source": "slack",
+            "mode": "recent_history",
+            "channel": target_channel,
+            "count": len(items),
+            "items": items,
+            "note": "Recent channel history retrieved within configured Slack permissions.",
+        },
+        indent=2,
+    )

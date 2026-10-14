@@ -295,9 +295,22 @@ def test_build_jql_from_query():
     jql2 = build_jql_from_query("Check issue SAM1-7")
     assert jql2 == 'issue = "SAM1-7"'
 
-    # Project mention
+    # Natural-language project mentions are text, not trusted project keys.
     jql3 = build_jql_from_query("Find bugs in SAM1")
-    assert 'project = "SAM1"' in jql3
+    assert "project =" not in jql3
+    assert 'text ~ "sam1"' in jql3
+
+    # Words following "project" or "in" must not become inferred project keys.
+    suspicious_project_names = build_jql_from_query(
+        "Investigate the RAG project in Jira updated"
+    )
+    assert 'project = "IN"' not in suspicious_project_names
+    assert 'project = "UPDATED"' not in suspicious_project_names
+    assert "text ~" in suspicious_project_names
+
+    generated_source_query = build_jql_from_query("RAG project issues tasks bugs")
+    assert "project =" not in generated_source_query
+    assert 'text ~ "rag project"' in generated_source_query
 
     # Empty query
     jql4 = build_jql_from_query("")
@@ -306,4 +319,3 @@ def test_build_jql_from_query():
     # Raw JQL query
     jql5 = build_jql_from_query("project = SAM1 AND statusCategory != Done")
     assert jql5 == "project = SAM1 AND statusCategory != Done"
-
